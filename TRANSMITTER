@@ -1,0 +1,57 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Receiver MAC (CHANGE THIS)
+uint8_t receiverMAC[] = {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC};
+
+typedef struct {
+  int requestOpen;
+} Message;
+
+typedef struct {
+  int ack;
+} AckMessage;
+
+Message msg;
+bool ackReceived = false;
+
+// Receive ACK from receiver
+void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
+  AckMessage ackMsg;
+  memcpy(&ackMsg, data, sizeof(ackMsg));
+
+  if (ackMsg.ack == 1) {
+    Serial.println("ACK received → Stop sending");
+    ackReceived = true;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.mode(WIFI_STA);
+  esp_now_init();
+
+  esp_now_register_recv_cb(onReceive);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, receiverMAC, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  esp_now_add_peer(&peerInfo);
+}
+
+void loop() {
+  if (!ackReceived) {
+    msg.requestOpen = 1;
+
+    esp_now_send(receiverMAC, (uint8_t *)&msg, sizeof(msg));
+    Serial.println("Sending OPEN request");
+
+    delay(500);  // send repeatedly
+  } else {
+    Serial.println("Waiting (door already triggered)");
+    delay(2000);
+  }
+}
