@@ -1,0 +1,156 @@
+// ── Blynk credentials ─────────────────────────────
+#define BLYNK_TEMPLATE_ID   "TMPL3ey6rQ-At"
+#define BLYNK_TEMPLATE_NAME "DOCK"
+#define BLYNK_AUTH_TOKEN    "7UnSJVCJwNJMDxWxZwCXvgIVXQ9_CF2j"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ── WiFi credentials ──────────────────────────────
+char ssid[] = "PRANAV";
+char pass[] = "12345678";
+
+// ── Pin definitions ───────────────────────────────
+#define RPWM        33
+#define LPWM        25
+#define SwitchOpen  14
+#define SwitchClose 13
+#define RainSensor  32
+#define TEMP_PIN    4
+
+// ── Blynk virtual pins ────────────────────────────
+#define VPIN_OPEN     V2
+#define VPIN_CLOSE    V3
+#define VPIN_TEMP     V1
+#define VPIN_RAIN     V0
+#define VPIN_OVERRIDE V4
+
+// ── Temperature setup ─────────────────────────────
+OneWire oneWire(TEMP_PIN);
+DallasTemperature sensors(&oneWire);
+BlynkTimer timer;
+
+// ── Variables ─────────────────────────────────────
+int blynkOpen     = 0;
+int blynkClose    = 0;
+int blynkOverride = 0;
+
+// ── Blynk handlers ────────────────────────────────
+BLYNK_WRITE(VPIN_OPEN) {
+  blynkOpen = param.asInt();
+  if (blynkOpen == 1) {
+    blynkClose = 0;
+    Blynk.virtualWrite(VPIN_CLOSE, 0);
+  }
+}
+
+BLYNK_WRITE(VPIN_CLOSE) {
+  blynkClose = param.asInt();
+  if (blynkClose == 1) {
+    blynkOpen = 0;
+    Blynk.virtualWrite(VPIN_OPEN, 0);
+  }
+}
+
+BLYNK_WRITE(VPIN_OVERRIDE) {
+  blynkOverride = param.asInt();
+}
+
+// ── Motor control ─────────────────────────────────
+void motorOpen() {
+  analogWrite(RPWM, 255);
+  analogWrite(LPWM, 0);
+}
+
+void motorClose() {
+  analogWrite(RPWM, 0);
+  analogWrite(LPWM, 255);
+}
+
+void motorStop() {
+  analogWrite(RPWM, 0);
+  analogWrite(LPWM, 0);
+}
+
+// ── Sensor read ───────────────────────────────────
+void readSensors() {
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);
+
+  if (tempC == -127.0 || tempC == 85.0) {
+    Serial.println("Temp sensor error!");
+    return;
+  }
+
+  int rainRaw = digitalRead(RainSensor);
+  String rainLabel = (rainRaw == LOW) ? "Rain" : "Dry";
+
+  Serial.print("Temp: ");
+  Serial.print(tempC);
+  Serial.print(" C | Rain: ");
+  Serial.println(rainLabel);
+
+  if (Blynk.connected()) {
+    Blynk.virtualWrite(VPIN_TEMP, tempC);
+    Blynk.virtualWrite(VPIN_RAIN, rainLabel);
+  }
+}
+
+// ── Setup ─────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(SwitchOpen,  INPUT_PULLUP);
+  pinMode(SwitchClose, INPUT_PULLUP);
+  pinMode(RainSensor,  INPUT_PULLUP);
+  pinMode(RPWM,        OUTPUT);
+  pinMode(LPWM,        OUTPUT);
+
+  motorStop();
+  sensors.begin();
+
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  if (Blynk.connect()) {
+    Serial.println("Blynk Connected!");
+  } else {
+    Serial.println("Blynk Failed");
+  }
+
+  timer.setInterval(1000L, readSensors);
+}
+
+// ── Loop ──────────────────────────────────────────
+void loop() {
+  Blynk.run();
+  timer.run();
+
+  int stateOpen  = digitalRead(SwitchOpen)  == LOW ? 1 : 0;
+  int stateClose = digitalRead(SwitchClose) == LOW ? 1 : 0;
+  int rainState  = digitalRead(RainSensor)  == LOW ? 1 : 0;
+
+  if (rainState == 1) {
+    if (blynkOverride == 1 || (stateOpen == 1 && stateClose == 0)) {
+      motorOpen();
+    } else if ((stateClose == 1 && stateOpen == 0) || (blynkClose == 1 && blynkOpen == 0)) {
+      motorClose();
+    } else {
+      motorClose(); // auto-close on rain
+    }
+  } else {
+    if      (stateOpen  == 1 && stateClose == 0) motorOpen();
+    else if (stateClose == 1 && stateOpen  == 0) motorClose();
+    else if (blynkOpen  == 1 && blynkClose == 0) motorOpen();
+    else if (blynkClose == 1 && blynkOpen  == 0) motorClose();
+    else                                          motorStop();
+  }
+}
