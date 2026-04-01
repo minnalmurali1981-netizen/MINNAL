@@ -1,0 +1,189 @@
+#define BLYNK_TEMPLATE_ID   "TMPL3ey6rQ-At"
+#define BLYNK_TEMPLATE_NAME "DOCK"
+#define BLYNK_AUTH_TOKEN    "YOUR_TOKEN"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <BlynkSimpleEsp32.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+char ssid[] = "PRANAV";
+char pass[] = "12345678";
+
+#define RPWM        33
+#define LPWM        25
+#define SwitchOpen  14
+#define SwitchClose 13
+#define RainSensor  32
+#define TEMP_PIN    4
+
+#define VPIN_OPEN     V2
+#define VPIN_CLOSE    V3
+#define VPIN_TEMP     V1
+#define VPIN_RAIN     V0
+#define VPIN_OVERRIDE V4
+
+OneWire oneWire(TEMP_PIN);
+DallasTemperature sensors(&oneWire);
+BlynkTimer timer;
+
+typedef struct {
+  String command;
+} Message;
+
+Message msg;
+
+int blynkOpen = 0, blynkClose = 0, blynkOverride = 0;
+bool doorOpenedByDrone = false;
+bool droneInside = false;
+unsigned long doorOpenTime = 0;
+
+// ── Motor Control ─────────────────────────────────
+void motorOpen() {
+  analogWrite(RPWM, 255);
+  analogWrite(LPWM, 0);
+}
+
+void motorClose() {
+  analogWrite(RPWM, 0);
+  analogWrite(LPWM, 255);
+}
+
+void motorStop() {
+  analogWrite(RPWM, 0);
+  analogWrite(LPWM, 0);
+}
+
+// ── ESP-NOW RECEIVE ───────────────────────────────
+void onReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  memcpy(&msg, data, sizeof(msg));
+
+  int rssi = info->rx_ctrl->rssi;
+  Serial.print("RSSI: "); Serial.print(rssi);
+  Serial.print(" | Command: "); Serial.println(msg.command);
+
+  if (msg.command == "OPEN" && !doorOpenedByDrone && !droneInside) {
+    Serial.println("Opening door");
+    motorOpen();
+    doorOpenTime = millis();
+    doorOpenedByDrone = true;
+  }
+
+  if (rssi < -90) {
+    droneInside = false;
+    Serial.println("Drone left → Ready for next landing");
+  }
+}
+
+// ── Blynk Handlers ────────────────────────────────
+BLYNK_WRITE(VPIN_OPEN) {
+  blynkOpen = param.asInt();
+  if (blynkOpen) {
+    blynkClose = 0;
+    Blynk.virtualWrite(VPIN_CLOSE, 0);
+  }
+}
+
+BLYNK_WRITE(VPIN_CLOSE) {
+  blynkClose = param.asInt();
+  if (blynkClose) {
+    blynkOpen = 0;
+    Blynk.virtualWrite(VPIN_OPEN, 0);
+  }
+}
+
+BLYNK_WRITE(VPIN_OVERRIDE) {
+  blynkOverride = param.asInt();
+}
+
+// ── Sensor Read ───────────────────────────────────
+void readSensors() {
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);
+
+  int rainRaw = digitalRead(RainSensor);
+  String rainLabel = (rainRaw == LOW) ? "Rain" : "Dry";
+
+  Serial.print("Temp: "); Serial.print(tempC);
+  Serial.print(" | Rain: "); Serial.println(rainLabel);
+
+  if (Blynk.connected()) {
+    Blynk.virtualWrite(VPIN_TEMP, tempC);
+    Blynk.virtualWrite(VPIN_RAIN, rainLabel);
+  }
+}
+
+// ── Setup ─────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(SwitchOpen, INPUT_PULLUP);
+  pinMode(SwitchClose, INPUT_PULLUP);
+  pinMode(RainSensor, INPUT_PULLUP);
+  pinMode(RPWM, OUTPUT);
+  pinMode(LPWM, OUTPUT);
+
+  motorStop();
+  sensors.begin();
+
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Init Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(onReceive);
+  Serial.println("ESP-NOW Ready");
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+  timer.setInterval(1000L, readSensors);
+}
+
+// ── LOOP ──────────────────────────────────────────
+void loop() {
+  Blynk.run();
+  timer.run();
+
+  int stateOpen  = digitalRead(SwitchOpen)  == LOW;
+  int stateClose = digitalRead(SwitchClose) == LOW;
+  int rainState  = digitalRead(RainSensor)  == LOW;
+
+  // ⏱ Auto close after 15s
+  if (doorOpenedByDrone && millis() - doorOpenTime >= 15000) {
+    Serial.println("Auto closing...");
+    motorClose();
+    delay(2000);
+    motorStop();
+    doorOpenedByDrone = false;
+    droneInside = true;
+  }
+
+  // 🌧 Rain override
+  if (rainState && blynkOverride == 0) {
+    motorClose();
+    return;
+  }
+
+  // 🎮 Manual + Blynk
+  if (!doorOpenedByDrone) {
+    if (stateOpen && !stateClose)      motorOpen();
+    else if (stateClose && !stateOpen) motorClose();
+    else if (blynkOpen && !blynkClose) motorOpen();
+    else if (blynkClose && !blynkOpen) motorClose();
+    else                               motorStop();
+  }
+
+  delay(100);
+}
