@@ -1,0 +1,108 @@
+#include <Arduino.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+#define RPWM 25
+#define LPWM 26
+
+#define RSSI_START  -75
+#define RSSI_RESET  -90
+
+typedef struct {
+  char command[10];
+} Message;
+
+Message msg;
+
+bool isRunning = false;
+bool readyForNext = true;
+
+uint8_t senderMAC[6];
+
+// receive command
+void onReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+
+  int rssi = info->rx_ctrl->rssi;
+
+  memcpy(&msg, data, sizeof(msg));
+
+  Serial.print("RSSI: ");
+  Serial.println(rssi);
+
+  // allow reset when far
+  if (rssi <= RSSI_RESET) {
+    readyForNext = true;
+    Serial.println("Reset allowed");
+  }
+
+  // block if running or not ready
+  if (isRunning || !readyForNext) return;
+
+  // accept only strong signal
+  if (strcmp(msg.command, "REQ") == 0 && rssi >= RSSI_START) {
+
+    isRunning = true;
+    readyForNext = false;
+
+    memcpy(senderMAC, info->src_addr, 6);
+
+    // send ACK
+    Message reply;
+    strcpy(reply.command, "OPENING");
+    esp_now_send(senderMAC, (uint8_t *)&reply, sizeof(reply));
+
+    Serial.println("Accepted → starting");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  pinMode(RPWM, OUTPUT);
+  pinMode(LPWM, OUTPUT);
+
+  digitalWrite(RPWM, LOW);
+  digitalWrite(LPWM, LOW);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Init Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(onReceive);
+
+  Serial.println("Receiver Ready");
+}
+
+void loop() {
+
+  if (isRunning) {
+
+    // 🔓 EXTEND (forward)
+    Serial.println("EXTENDING");
+    digitalWrite(RPWM, HIGH);
+    digitalWrite(LPWM, LOW);
+    delay(30000);   // 30 sec
+
+    // ⏱ WAIT
+    Serial.println("WAIT");
+    digitalWrite(RPWM, LOW);
+    digitalWrite(LPWM, LOW);
+    delay(15000);   // 15 sec
+
+    // 🔒 RETRACT (reverse)
+    Serial.println("RETRACTING");
+    digitalWrite(RPWM, LOW);
+    digitalWrite(LPWM, HIGH);
+    delay(30000);   // 30 sec
+
+    // STOP
+    digitalWrite(RPWM, LOW);
+    digitalWrite(LPWM, LOW);
+
+    Serial.println("Cycle complete");
+
+    isRunning = false;
+  }
+}
