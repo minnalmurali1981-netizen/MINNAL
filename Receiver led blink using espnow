@@ -1,0 +1,96 @@
+#include <Arduino.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+#define LED 2
+
+#define RSSI_START  -75
+#define RSSI_RESET  -90
+
+typedef struct {
+  char command[10];
+} Message;
+
+Message msg;
+
+bool isRunning = false;
+bool readyForNext = true;
+
+uint8_t senderMAC[6];
+
+// receive command
+void onReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+
+  int rssi = info->rx_ctrl->rssi;
+
+  memcpy(&msg, data, sizeof(msg));
+
+  Serial.print("RSSI: ");
+  Serial.println(rssi);
+
+  // allow reset when far
+  if (rssi <= RSSI_RESET) {
+    readyForNext = true;
+    Serial.println("Reset allowed");
+  }
+
+  // block if running or not ready
+  if (isRunning || !readyForNext) return;
+
+  // accept only strong signal
+  if (strcmp(msg.command, "REQ") == 0 && rssi >= RSSI_START) {
+
+    isRunning = true;
+    readyForNext = false;
+
+    memcpy(senderMAC, info->src_addr, 6);
+
+    // send ACK
+    Message reply;
+    strcpy(reply.command, "OPENING");
+    esp_now_send(senderMAC, (uint8_t *)&reply, sizeof(reply));
+
+    Serial.println("Accepted → starting");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Init Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(onReceive);
+
+  Serial.println("Receiver Ready");
+}
+
+void loop() {
+
+  if (isRunning) {
+
+    // 🔓 OPEN (LED ON)
+    Serial.println("LED ON");
+    digitalWrite(LED, HIGH);
+    delay(5000);
+
+    // ⏱ WAIT
+    Serial.println("WAIT");
+    delay(3000);
+
+    // 🔒 CLOSE (LED OFF)
+    Serial.println("LED OFF");
+    digitalWrite(LED, LOW);
+    delay(5000);
+
+    Serial.println("Cycle complete");
+
+    isRunning = false;
+  }
+}
