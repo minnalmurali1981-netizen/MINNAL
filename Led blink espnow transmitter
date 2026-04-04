@@ -1,0 +1,65 @@
+#include <Arduino.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
+uint8_t receiverMAC[] = {0x3C, 0x8A, 0x1F, 0x0C, 0x72, 0xA0};
+
+typedef struct {
+  char command[10];
+} Message;
+
+Message msg;
+
+bool acknowledged = false;
+
+// receive ACK
+void onReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  Message incoming;
+  memcpy(&incoming, data, sizeof(incoming));
+
+  Serial.print("Received: ");
+  Serial.println(incoming.command);
+
+  if (strcmp(incoming.command, "OPENING") == 0) {
+    acknowledged = true;
+    Serial.println("ACK received. Stopping transmission.");
+
+    // stop completely
+    while (true) {
+      delay(1000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Init Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(onReceive);
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, receiverMAC, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+
+  esp_now_add_peer(&peer);
+
+  Serial.println("Transmitter Ready");
+}
+
+void loop() {
+
+  if (!acknowledged) {
+    strcpy(msg.command, "REQ");
+
+    esp_now_send(receiverMAC, (uint8_t *)&msg, sizeof(msg));
+    Serial.println("Sending REQ");
+
+    delay(1000);
+  }
+}
